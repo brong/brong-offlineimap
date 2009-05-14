@@ -308,6 +308,10 @@ class IMAPServer:
             self.delim = imaputil.dequote(self.delim)
             self.root = imaputil.dequote(self.root)
 
+        # attempt to enable compression
+        if 'COMPRESS=DEFLATE' in imapobj.capabilities:
+            imapobj.enable_compression()
+
         self.connectionlock.acquire()
         self.assignedconnections.append(imapobj)
         self.lastowner[imapobj] = thread.get_ident()
