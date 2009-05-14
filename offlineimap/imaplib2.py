@@ -33,7 +33,7 @@ New socket open code from http://www.python.org/doc/lib/socket-example.html."""
 __author__ = "Piers Lauder <piers@janeelix.com>"
 # Source URL: http://www.cs.usyd.edu.au/~piers/python/imaplib2
 
-import binascii, os, Queue, random, re, select, socket, sys, time, threading
+import binascii, os, Queue, random, re, select, socket, sys, time, threading, zlib
 
 select_module = select
 
@@ -62,6 +62,7 @@ Commands = {
         'CAPABILITY':   ((NONAUTH, AUTH, SELECTED),   True),
         'CHECK':        ((SELECTED,),                 True),
         'CLOSE':        ((SELECTED,),                 False),
+        'COMPRESS':     ((AUTH,),                     False),
         'COPY':         ((SELECTED,),                 True),
         'CREATE':       ((AUTH, SELECTED),            True),
         'DELETE':       ((AUTH, SELECTED),            True),
@@ -301,6 +302,9 @@ class IMAP4(object):
         self.inth = threading.Thread(target=self._handler)
         self.inth.start()
 
+        self.decompressor = None;
+        self.compressor = None;
+
         # Get server welcome message,
         # request and store CAPABILITY response.
 
@@ -379,16 +383,54 @@ class IMAP4(object):
         return s
 
 
+    def start_compressing(self):
+        """start_compressing()
+        Enable deflate compression on the socket (RFC 4978)."""
+
+        # rfc 1951 - pure DEFLATE, so use -15 for both windows
+        self.decompressor = zlib.decompressobj(-15)
+        self.compressor = zlib.compressobj(zlib.Z_DEFAULT_COMPRESSION,
+                                           zlib.DEFLATED, -15) 
+
+
+    def enable_compression(self):
+        """enable_compression()
+        Ask the server to start compressing the connection."""
+
+	try:
+            typ, dat = self._simple_command('COMPRESS', 'DEFLATE')
+            if typ == 'OK':
+                self.start_compressing()           
+                if __debug__: 
+                    self._log(1, 'Enabled COMPRESS=DEFLATE')
+	    
+        finally:
+            self.state_change_pending.release()
+
+
     def read(self, size):
         """data = read(size)
         Read at most 'size' bytes from remote."""
 
-        return self.sock.recv(size)
+        if (self.decompressor):
+            if (self.decompressor.unconsumed_tail):
+                data = self.decompressor.unconsumed_tail
+            else:
+                data = self.sock.recv(8192)
+            data = self.decompressor.decompress(data, size)
+        else:
+            data = self.sock.recv(size)
+
+        return data
 
 
     def send(self, data):
         """send(data)
         Send 'data' to remote."""
+
+        if (self.compressor):
+            data = self.compressor.compress(data)
+            data += self.compressor.flush(zlib.Z_SYNC_FLUSH)
 
         self.sock.sendall(data)
 
@@ -1673,12 +1715,24 @@ class IMAP4_SSL(IMAP4):
         """data = read(size)
         Read at most 'size' bytes from remote."""
 
-        return self.sslobj.read(size)
+        if (self.decompressor):
+            if (self.decompressor.unconsumed_tail):
+                data = self.decompressor.unconsumed_tail
+            else:
+                data = self.sslobj.read(8192)
+            data = self.decompressor.decompress(data, size)
+        else:
+            data = self.sslobj.read(size)
 
+        return data
 
     def send(self, data):
         """send(data)
         Send 'data' to remote."""
+
+        if (self.compressor):
+            data = self.compressor.compress(data)
+            data += self.compressor.flush(zlib.Z_SYNC_FLUSH)
 
         # NB: socket.ssl needs a "sendall" method to match socket objects.
         bytes = len(data)
@@ -1736,11 +1790,24 @@ class IMAP4_stream(IMAP4):
     def read(self, size):
         """Read 'size' bytes from remote."""
 
-        return os.read(self.read_fd, size)
+        if (self.decompressor):
+            if (self.decompressor.unconsumed_tail):
+                data = self.decompressor.unconsumed_tail
+            else:
+                data = os.read(self.read_fd, 8192)
+            data = self.decompressor.decompress(data, size)
+        else:
+            data = os.read(self.read_fd, size)
+
+        return data
 
 
     def send(self, data):
         """Send data to remote."""
+
+        if (self.compressor):
+            data = self.compressor.compress(data)
+            data += self.compressor.flush(zlib.Z_SYNC_FLUSH)
 
         self.writefile.write(data)
         self.writefile.flush()
